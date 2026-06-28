@@ -3,15 +3,15 @@
     "step": {
       "user": {
         "title": "Connect to Innova Butler Touch",
-        "description": "Enter the local IP address (or hostname) of your Butler Touch device.",
+        "description": "Enter the local IP address (or hostname) of your Butler Touch controller. No cloud account required.",
         "data": {
-          "host": "Host / IP address",
-          "port": "Port (default: 80)"
+          "host": "IP address / hostname",
+          "port": "HTTP port (default: 80)"
         }
       }
     },
     "error": {
-      "cannot_connect": "Unable to connect to the Butler Touch. Check the IP address and make sure the device is on the same network."
+      "cannot_connect": "Unable to connect. Check the IP address and make sure the device is on the same network as Home Assistant."
     },
     "abort": {
       "already_configured": "This Butler Touch is already configured."
@@ -20,9 +20,9 @@
   "options": {
     "step": {
       "init": {
-        "title": "Butler Touch Options",
+        "title": "Butler Touch options",
         "data": {
-          "scan_interval": "Polling interval (seconds)"
+          "scan_interval": "Polling interval (seconds, 10–3600)"
         }
       }
     }

@@ -1,51 +1,78 @@
 """Local HTTP API client for Innova Butler Touch.
 
-The Butler Touch exposes a PHP-based REST API at:
-  http://<host>/installedplugin/com.innova.ambiente/2.0/server/index.php
+All requests go to:
+  http://<host>:<port>/installedplugin/com.innova.ambiente/2.0/server/index.php
 
-All responses share a common envelope:
+Every response envelope:
   {
-    "sw": {"V": "3.x.x"},
+    "sw":      { "V": "3.x.x" },
     "success": true,
-    "errors": {},
-    "lb": {},
-    "RESULT": { ... }
+    "errors":  {},
+    "RESULT":  { ... }
   }
 
-Key endpoints (all GET unless noted):
-  ?Action=getHomepage
-      Returns full home structure with all rooms and devices.
+Observed endpoints
+──────────────────
+GET  ?Action=getHomepage
+     Returns the full home tree: home → rooms → devices.
+     Home state includes homeUid, name, mode (0/1) and all device states.
 
-  ?Action=detailDevice&deviceUid=<uid>
-      Returns a single device's current state.
+GET  ?Action=detailDevice&deviceUid=<uid>
+     Returns a single device's current state dict.
 
-  ?Action=setSetPoint   [POST]
-      Body (form-encoded): deviceUid=<uid>&value=<float>
-      Sets the target temperature.
+POST ?Action=setSetPoint
+     Body: deviceUid=<uid>&value=<float>
+     Sets the target temperature.
 
-  ?Action=setHfm        [POST]
-      Body (form-encoded): deviceUid=<uid>&type=<none|hour|forever>&value=<int>
-      Controls the "HFM" (hold/force-mode) standby override:
-        type=none  → clear override (restore normal schedule)
-        type=hour  → override for <value> hours
-        type=forever → hold indefinitely (standby off permanently)
-      Effectively used to turn the device on (type=forever) or
-      return it to its calendar schedule (type=none).
+POST ?Action=setFunction
+     Body: function=<1-4>&deviceUid=<uid>
+     Sets fan speed: 1=auto 2=notte 3=minimo 4=massimo.
 
-  ?Action=setModeHome   [POST]
-      Body (form-encoded): mode=<int>
-      Sets the home heating/cooling mode (1 = heating, 2 = cooling, …).
-      This is a home-wide setting, not per-device.
+POST ?Action=powerOnDevice
+     Body: deviceUid=<uid>
+     Turns a device ON (clears powered-off state, activates it).
 
-Device state fields (from detailDevice / getHomepage):
-  tempRoom    float   Current room temperature (°C)
-  tempSet     float   Target setpoint (°C)
-  standBy     {value: 0|1}   0 = active, 1 = in standby
-  mode        int     Home mode: 1 = heating, 2 = cooling, …
-  settings.function.value  int  Fan speed:
-                          1 = AUTO, 2 = NIGHT (low), 3 = MIN, 4 = MAX
-  min / max   float   Allowed setpoint range
-  connectionStatus.status  int  1 = connected, 0 = offline
+POST ?Action=powerOffDevice
+     Body: deviceUid=<uid>
+     Turns a device OFF completely (not just standby — powered off).
+
+POST ?Action=setHfm
+     Body: deviceUid=<uid>&type=<none|hour|day|forever>&value=<int>
+     Sets the schedule-override (Hold-Force-Mode):
+       type=none    value=0    → clear any override, return to calendar
+       type=hour    value=N    → override for N hours (N ≥ 1)
+       type=day     value=N    → override for N×24 hours (e.g. value=24 = 1 day)
+       type=forever value=-1   → hold indefinitely
+     The HFM determines whether the device follows its calendar or stays in
+     a user-forced state. It must be set BEFORE powerOn/powerOff or setFunction
+     when the user wants a timed or permanent override.
+
+POST ?Action=setModeHome
+     Body: mode=<0|1>&homeUid=<uid>
+     Sets the home-wide heating/cooling mode:
+       0 = heating  (riscaldamento)
+       1 = cooling  (raffreddamento)
+     Confirmed from JS source getModeOptions():
+       { value: 0, label: "MODE_HEATING" }
+       { value: 1, label: "MODE_COOLING" }
+     Note: this is a home-wide setting — all devices are affected.
+
+Device state fields (from getHomepage / detailDevice)
+──────────────────────────────────────────────────────
+  uid              str    Device unique identifier
+  name             str    Room/device name
+  type             str    "FCL485"
+  mode             int    Home mode: 0=auto 1=heating
+  tempRoom         float  Current room temperature (°C)
+  tempSet          float  Target setpoint (°C)
+  min              float  Minimum allowed setpoint
+  max              float  Maximum allowed setpoint
+  standBy.value    int    0=active 1=standby
+  settings.function.value  int  Fan speed (1–4)
+  hfm.type         str    Current override type (none/hour/day/forever)
+  hfm.deadline     int    Unix timestamp of override expiry (0 or -1 = n/a)
+  hfmEnable        bool   Whether HFM is supported on this device
+  connectionStatus.status  int  1=online 0=offline
 """
 
 from __future__ import annotations
@@ -58,21 +85,7 @@ import aiohttp
 
 _LOGGER = logging.getLogger(__name__)
 
-BASE_PATH = "/installedplugin/com.innova.ambiente/2.0/server/index.php"
-
-# Home mode values observed in the API
-HOME_MODE_HEATING = 1
-HOME_MODE_COOLING = 2
-
-# Fan function values
-FAN_AUTO = 1
-FAN_NIGHT = 2   # low / silent
-FAN_MIN = 3
-FAN_MAX = 4
-
-# Standby values
-STANDBY_OFF = 0  # device is active
-STANDBY_ON = 1   # device is in standby
+_API_PATH = "/installedplugin/com.innova.ambiente/2.0/server/index.php"
 
 
 class ButlerTouchApiError(Exception):
@@ -95,9 +108,7 @@ class ButlerTouchApi:
         self._timeout = aiohttp.ClientTimeout(total=request_timeout)
         self._owns_session = session is None
 
-    # ------------------------------------------------------------------
-    # Session management
-    # ------------------------------------------------------------------
+    # ── Session management ────────────────────────────────────────────────────
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -105,15 +116,14 @@ class ButlerTouchApi:
         return self._session
 
     async def close(self) -> None:
+        """Close the HTTP session if we own it."""
         if self._owns_session and self._session and not self._session.closed:
             await self._session.close()
 
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+    # ── Low-level helpers ─────────────────────────────────────────────────────
 
     def _url(self) -> str:
-        return f"http://{self._host}:{self._port}{BASE_PATH}"
+        return f"http://{self._host}:{self._port}{_API_PATH}"
 
     async def _get(self, params: dict[str, Any]) -> dict[str, Any]:
         session = await self._get_session()
@@ -125,146 +135,184 @@ class ButlerTouchApi:
                 data = await resp.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise ButlerTouchApiError(f"GET {params} failed: {exc}") from exc
-
         if not data.get("success", False):
             raise ButlerTouchApiError(
-                f"API returned success=false for GET {params}: {data.get('errors')}"
+                f"API error for GET {params}: {data.get('errors')}"
             )
         return data["RESULT"]
 
-    async def _post(self, action: str, data: dict[str, Any]) -> dict[str, Any]:
+    async def _post(self, action: str, body: dict[str, Any]) -> dict[str, Any]:
         session = await self._get_session()
-        params = {"Action": action}
         try:
             async with session.post(
                 self._url(),
-                params=params,
-                data=data,
+                params={"Action": action},
+                data=body,
                 timeout=self._timeout,
             ) as resp:
                 resp.raise_for_status()
-                result = await resp.json(content_type=None)
+                data = await resp.json(content_type=None)
         except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
             raise ButlerTouchApiError(f"POST {action} failed: {exc}") from exc
-
-        if not result.get("success", False):
+        if not data.get("success", False):
             raise ButlerTouchApiError(
-                f"API returned success=false for POST {action}: {result.get('errors')}"
+                f"API error for POST {action}: {data.get('errors')}"
             )
-        return result.get("RESULT", {})
+        return data.get("RESULT", {})
 
-    # ------------------------------------------------------------------
-    # Public API methods
-    # ------------------------------------------------------------------
+    # ── Public API ────────────────────────────────────────────────────────────
 
     async def get_homepage(self) -> dict[str, Any]:
-        """Return the full home structure (all rooms and devices).
+        """Return the home dict (uid, name, mode, rooms[]).
 
-        The result is the home dict:
-        {
-          "uid": "...",
-          "name": "...",
-          "mode": 1,
-          "rooms": [
-            {
-              "uid": "...",
-              "name": "...",
-              "devices": {
-                "<device_uid>": { <device_state> }
-              }
-            }
-          ]
-        }
-
-        Note: getHomepage returns `RESULT.user.homes[0]` in the full payload.
-        We unwrap to the first home for simplicity (single-home assumption,
-        which matches typical Butler Touch deployments).
+        The API wraps data in user.homes[0]; we unwrap for convenience.
         """
         result = await self._get({"Action": "getHomepage"})
-        # getHomepage wraps in user.homes[]
         if "user" in result:
             homes = result["user"].get("homes", [])
             if not homes:
-                raise ButlerTouchApiError("No homes found in getHomepage response")
+                raise ButlerTouchApiError("getHomepage returned no homes")
             return homes[0]
-        # Fallback: some firmware versions return the home directly
-        return result
+        return result  # some firmware versions return the home directly
 
-    async def get_all_devices(self) -> dict[str, dict[str, Any]]:
-        """Return a flat dict of {device_uid: device_state} for all devices."""
+    async def get_all_devices(self) -> tuple[dict[str, Any], dict[str, dict[str, Any]]]:
+        """Return (home_meta, {device_uid: device_state}) for all devices.
+
+        home_meta contains uid, name, mode (used for setModeHome).
+        """
         home = await self.get_homepage()
+        home_meta = {
+            "uid": home.get("uid", ""),
+            "name": home.get("name", ""),
+            "mode": home.get("mode", 1),
+        }
         devices: dict[str, dict[str, Any]] = {}
         for room in home.get("rooms", []):
             for uid, dev in room.get("devices", {}).items():
                 dev["_room_name"] = room.get("name", "")
                 devices[uid] = dev
-        return devices
+        return home_meta, devices
 
     async def get_device(self, device_uid: str) -> dict[str, Any]:
         """Return the current state of a single device."""
-        return await self._get(
-            {"Action": "detailDevice", "deviceUid": device_uid}
-        )
+        return await self._get({"Action": "detailDevice", "deviceUid": device_uid})
+
+    # ── Temperature ───────────────────────────────────────────────────────────
 
     async def set_setpoint(self, device_uid: str, temperature: float) -> None:
         """Set the target temperature for a device (°C)."""
-        _LOGGER.debug("set_setpoint %s -> %.1f", device_uid, temperature)
+        _LOGGER.debug("set_setpoint %s → %.1f°C", device_uid, temperature)
         await self._post(
             "setSetPoint",
             {"deviceUid": device_uid, "value": f"{temperature:.1f}"},
         )
 
-    async def set_standby(self, device_uid: str, standby: bool) -> None:
-        """Turn a device on (standby=False) or off (standby=True).
+    # ── Fan speed ─────────────────────────────────────────────────────────────
 
-        The Butler Touch does not have a direct on/off command; instead it
-        uses the HFM (hold-force-mode) mechanism:
-          - standby=False → type=forever (force active indefinitely)
-          - standby=True  → type=none    (return to schedule / standby)
+    async def set_function(self, device_uid: str, function_value: int) -> None:
+        """Set fan speed / function for a device.
+
+        function_value: 1=auto  2=notte  3=minimo  4=massimo
+        POST body: function=<value>&deviceUid=<uid>
         """
-        _LOGGER.debug("set_standby %s -> %s", device_uid, standby)
-        if standby:
-            # Return to calendar schedule (which may put it in standby)
-            hfm_type = "none"
-            hfm_value = 0
-        else:
-            # Force device to stay on indefinitely
-            hfm_type = "forever"
-            hfm_value = -1
+        _LOGGER.debug("set_function %s → %d", device_uid, function_value)
+        await self._post(
+            "setFunction",
+            {"function": function_value, "deviceUid": device_uid},
+        )
+
+    # ── Power on / off ────────────────────────────────────────────────────────
+
+    async def power_on(self, device_uid: str) -> None:
+        """Turn a device fully ON.
+
+        POST body: deviceUid=<uid>
+        The app typically also sets an HFM override before calling this so
+        the device stays on for a defined period. Use power_on_with_hfm()
+        for that combined behaviour.
+        """
+        _LOGGER.debug("power_on %s", device_uid)
+        await self._post("powerOnDevice", {"deviceUid": device_uid})
+
+    async def power_off(self, device_uid: str) -> None:
+        """Turn a device fully OFF.
+
+        POST body: deviceUid=<uid>
+        """
+        _LOGGER.debug("power_off %s", device_uid)
+        await self._post("powerOffDevice", {"deviceUid": device_uid})
+
+    # ── HFM (schedule override) ───────────────────────────────────────────────
+
+    async def set_hfm(
+        self,
+        device_uid: str,
+        hfm_type: str,
+        value: int,
+    ) -> None:
+        """Set the schedule-override (Hold-Force-Mode).
+
+        hfm_type / value combinations:
+          "none"    0    → clear override, return to calendar
+          "hour"    N    → override for N hours  (N ≥ 1)
+          "day"     N    → override for N×24 h   (e.g. 24 = 1 day)
+          "forever" -1   → hold indefinitely
+        """
+        _LOGGER.debug("set_hfm %s type=%s value=%d", device_uid, hfm_type, value)
         await self._post(
             "setHfm",
-            {"deviceUid": device_uid, "type": hfm_type, "value": hfm_value},
+            {"deviceUid": device_uid, "type": hfm_type, "value": value},
         )
 
-    async def set_fan_function(self, device_uid: str, function_value: int) -> None:
-        """Set the fan speed / function for a device.
+    async def clear_hfm(self, device_uid: str) -> None:
+        """Convenience: clear any active HFM override (return to calendar)."""
+        await self.set_hfm(device_uid, "none", 0)
 
-        function_value: 1=AUTO, 2=NIGHT, 3=MIN, 4=MAX
-        Note: There is no dedicated setFunction endpoint in the observed API.
-        Fan speed is part of the calendar/settings — this is a limitation of
-        the local API. This method is included for completeness but may not
-        be supported on all firmware versions.
+    # ── Combined helpers (matching app behaviour) ─────────────────────────────
+
+    async def power_on_with_hfm(
+        self,
+        device_uid: str,
+        hfm_type: str = "forever",
+        hfm_value: int = -1,
+    ) -> None:
+        """Turn device ON and set an HFM override.
+
+        The Butler Touch app always calls setHfm before powerOnDevice so the
+        device knows how long to stay on. Default is 'forever' (indefinite).
         """
-        _LOGGER.warning(
-            "set_fan_function is not directly supported by the Butler Touch "
-            "local API (no setFunction endpoint observed). Skipping."
-        )
+        await self.set_hfm(device_uid, hfm_type, hfm_value)
+        await self.power_on(device_uid)
 
-    async def set_home_mode(self, mode: int) -> None:
+    async def power_off_with_hfm(
+        self,
+        device_uid: str,
+        hfm_type: str = "forever",
+        hfm_value: int = -1,
+    ) -> None:
+        """Turn device OFF and optionally set an HFM override.
+
+        Default is 'forever' so the device stays off until explicitly turned on.
+        """
+        await self.set_hfm(device_uid, hfm_type, hfm_value)
+        await self.power_off(device_uid)
+
+    # ── Home-wide mode ────────────────────────────────────────────────────────
+
+    async def set_home_mode(self, home_uid: str, mode: int) -> None:
         """Set the home-wide heating/cooling mode.
 
-        mode: 1=heating, 2=cooling (observed values)
-        This affects all devices in the home.
+        mode: 0=heating (riscaldamento), 1=cooling (raffreddamento)
+        Use the HOME_MODE_HEATING / HOME_MODE_COOLING constants from const.py.
+        Requires homeUid from getHomepage.
         """
-        _LOGGER.debug("set_home_mode -> %d", mode)
-        await self._post("setModeHome", {"mode": mode})
+        _LOGGER.debug("set_home_mode homeUid=%s mode=%d", home_uid, mode)
+        await self._post("setModeHome", {"mode": mode, "homeUid": home_uid})
 
-    # ------------------------------------------------------------------
-    # Convenience helpers
-    # ------------------------------------------------------------------
+    # ── Connectivity ──────────────────────────────────────────────────────────
 
     async def test_connection(self) -> bool:
-        """Return True if the Butler Touch is reachable and responsive."""
+        """Return True if the Butler Touch is reachable."""
         try:
             await self.get_homepage()
             return True

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass, field
 from datetime import timedelta
+from typing import Any
 
-import aiohttp
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant
@@ -21,6 +22,17 @@ _LOGGER = logging.getLogger(__name__)
 PLATFORMS = [Platform.CLIMATE]
 
 
+@dataclass
+class ButlerTouchData:
+    """Combined data snapshot returned by the coordinator."""
+
+    home_meta: dict[str, Any] = field(default_factory=dict)
+    """Home-level info: uid, name, mode."""
+
+    devices: dict[str, dict[str, Any]] = field(default_factory=dict)
+    """Flat map of device_uid → device state dict."""
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Innova Butler Touch from a config entry."""
     host = entry.data[CONF_HOST]
@@ -32,8 +44,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     coordinator = ButlerTouchCoordinator(hass, api, entry)
     await coordinator.async_config_entry_first_refresh()
 
-    if not coordinator.data:
-        raise ConfigEntryNotReady(f"Could not connect to Butler Touch at {host}:{port}")
+    if not coordinator.data or not coordinator.data.devices:
+        raise ConfigEntryNotReady(
+            f"Could not retrieve device list from Butler Touch at {host}:{port}"
+        )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
 
@@ -49,7 +63,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     return unload_ok
 
 
-class ButlerTouchCoordinator(DataUpdateCoordinator):
+class ButlerTouchCoordinator(DataUpdateCoordinator[ButlerTouchData]):
     """Coordinator that polls the Butler Touch for device states."""
 
     def __init__(
@@ -68,9 +82,10 @@ class ButlerTouchCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=scan_interval),
         )
 
-    async def _async_update_data(self) -> dict:
-        """Fetch latest state for all devices from the Butler Touch."""
+    async def _async_update_data(self) -> ButlerTouchData:
+        """Fetch the latest state from the Butler Touch."""
         try:
-            return await self.api.get_all_devices()
+            home_meta, devices = await self.api.get_all_devices()
         except ButlerTouchApiError as exc:
             raise UpdateFailed(f"Butler Touch update failed: {exc}") from exc
+        return ButlerTouchData(home_meta=home_meta, devices=devices)

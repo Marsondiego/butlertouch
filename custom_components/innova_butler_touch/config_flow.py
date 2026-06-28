@@ -15,7 +15,7 @@ from .const import CONF_HOST, CONF_PORT, DEFAULT_PORT, DEFAULT_SCAN_INTERVAL, DO
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
+STEP_USER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_HOST): str,
         vol.Optional(CONF_PORT, default=DEFAULT_PORT): vol.Coerce(int),
@@ -24,7 +24,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 
 
 class ButlerTouchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Innova Butler Touch."""
+    """Config flow for Innova Butler Touch."""
 
     VERSION = 1
 
@@ -34,42 +34,39 @@ class ButlerTouchConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            host = user_input[CONF_HOST]
+            host = user_input[CONF_HOST].strip()
             port = user_input.get(CONF_PORT, DEFAULT_PORT)
 
             session = async_get_clientsession(self.hass)
             api = ButlerTouchApi(host=host, port=port, session=session)
-
             try:
                 home = await api.get_homepage()
-                home_name = home.get("name", host)
             except ButlerTouchApiError as exc:
-                _LOGGER.warning("Butler Touch connection failed: %s", exc)
+                _LOGGER.debug("Butler Touch connection test failed: %s", exc)
                 errors["base"] = "cannot_connect"
             else:
                 await self.async_set_unique_id(f"butler_touch_{host}_{port}")
                 self._abort_if_unique_id_configured()
+                home_name = home.get("name", host)
                 return self.async_create_entry(
-                    title=f"Butler Touch ({home_name})",
-                    data=user_input,
+                    title=f"Butler Touch – {home_name}",
+                    data={CONF_HOST: host, CONF_PORT: port},
                 )
 
         return self.async_show_form(
             step_id="user",
-            data_schema=STEP_USER_DATA_SCHEMA,
+            data_schema=STEP_USER_SCHEMA,
             errors=errors,
         )
 
     @staticmethod
     @callback
-    def async_get_options_flow(
-        config_entry: config_entries.ConfigEntry,
-    ) -> ButlerTouchOptionsFlow:
-        return ButlerTouchOptionsFlow(config_entry)
+    def async_get_options_flow(entry: config_entries.ConfigEntry) -> ButlerTouchOptionsFlow:
+        return ButlerTouchOptionsFlow(entry)
 
 
 class ButlerTouchOptionsFlow(config_entries.OptionsFlow):
-    """Handle options (polling interval)."""
+    """Options flow: let user change polling interval."""
 
     def __init__(self, entry: config_entries.ConfigEntry) -> None:
         self._entry = entry
@@ -80,14 +77,14 @@ class ButlerTouchOptionsFlow(config_entries.OptionsFlow):
         if user_input is not None:
             return self.async_create_entry(title="", data=user_input)
 
-        current_interval = self._entry.options.get(
-            "scan_interval", DEFAULT_SCAN_INTERVAL
+        current = self._entry.options.get("scan_interval", DEFAULT_SCAN_INTERVAL)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional("scan_interval", default=current): vol.All(
+                        vol.Coerce(int), vol.Range(min=10, max=3600)
+                    )
+                }
+            ),
         )
-        schema = vol.Schema(
-            {
-                vol.Optional("scan_interval", default=current_interval): vol.All(
-                    vol.Coerce(int), vol.Range(min=10, max=3600)
-                )
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=schema)
