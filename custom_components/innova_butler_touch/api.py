@@ -184,7 +184,7 @@ class ButlerTouchApi:
         home_meta = {
             "uid": home.get("uid", ""),
             "name": home.get("name", ""),
-            "mode": home.get("mode", 1),
+            "mode": home.get("mode", 1),  # 0=heating, 1=cooling (raffreddamento default)
         }
         devices: dict[str, dict[str, Any]] = {}
         for room in home.get("rooms", []):

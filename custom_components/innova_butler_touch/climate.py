@@ -159,8 +159,11 @@ class ButlerTouchClimate(CoordinatorEntity[ButlerTouchCoordinator], ClimateEntit
 
     @property
     def _home_mode(self) -> int:
-        # Prefer device-level mode (propagated from home), fall back to home_meta
-        return self._dev.get("mode", self.coordinator.data.home_meta.get("mode", HOME_MODE_HEATING))
+        # Always read from home_meta (the home-level field).
+        # The per-device "mode" field uses a different value set and must NOT
+        # be used for the FCL485 heating/cooling switch.
+        # home_meta.mode: 0=riscaldamento (heating), 1=raffreddamento (cooling)
+        return self.coordinator.data.home_meta.get("mode", HOME_MODE_HEATING)
 
     @property
     def _is_on(self) -> bool:
@@ -206,7 +209,7 @@ class ButlerTouchClimate(CoordinatorEntity[ButlerTouchCoordinator], ClimateEntit
     def hvac_mode(self) -> HVACMode:
         if not self._is_on:
             return HVACMode.OFF
-        return _HOME_MODE_TO_HVAC.get(self._home_mode, HVACMode.HEAT)
+        return _HOME_MODE_TO_HVAC.get(self._home_mode, HVACMode.COOL)
 
     @property
     def fan_mode(self) -> str:
@@ -274,10 +277,8 @@ class ButlerTouchClimate(CoordinatorEntity[ButlerTouchCoordinator], ClimateEntit
                 # Change home-wide mode first if needed
                 if target_mode != self._home_mode:
                     await self.coordinator.api.set_home_mode(self._home_uid, target_mode)
-                    # Propagate to all devices in coordinator cache
+                    # Update home_meta only — _home_mode reads exclusively from here
                     self.coordinator.data.home_meta["mode"] = target_mode
-                    for dev in self.coordinator.data.devices.values():
-                        dev["mode"] = target_mode
 
                 # Turn device on (hold forever so it stays on past schedule)
                 await self.coordinator.api.power_on_with_hfm(
