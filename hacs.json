@@ -1,4 +1,6 @@
 {
   "name": "Innova Butler Touch",
-  "render_readme": true
+  "render_readme": true,
+  "homeassistant": "2023.4.0",
+  "hacs": "1.32.0"
 }
