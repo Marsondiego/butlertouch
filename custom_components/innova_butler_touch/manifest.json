@@ -1,0 +1,12 @@
+{
+  "domain": "innova_butler_touch",
+  "name": "Innova Butler Touch",
+  "version": "1.0.0",
+  "documentation": "https://github.com/your-repo/homeassistant-innova-butler-touch",
+  "issue_tracker": "https://github.com/your-repo/homeassistant-innova-butler-touch/issues",
+  "dependencies": [],
+  "codeowners": [],
+  "requirements": [],
+  "config_flow": true,
+  "iot_class": "local_polling"
+}
